@@ -1,60 +1,413 @@
-const STORAGE_KEY = "appData";
-const WORD_CLICKABLE_REGEX = /^[A-Za-z]+(?:'[A-Za-z]+)?$/;
+const APP_DATA_KEY = "appData";
+const THEME_KEY = "theme";
+const TRANSLATIONS_KEY = "translations";
 const TOKEN_REGEX = /\w+|\s+|[^\s\w]+/g;
-
-const defaultData = {
-  sections: [
-    {
-      id: 1,
-      title: "Beginner Stories",
-      blocks: [
-        {
-          id: 1,
-          title: "A Morning Walk",
-          text: "Tom goes for a walk every morning. He sees birds, trees, and smiling people in the park.",
-        },
-      ],
-    },
-  ],
-};
+const WORD_ONLY_REGEX = /^[a-zA-Z]+$/;
 
 const appRoot = document.getElementById("app");
-const countChip = document.getElementById("block-count");
 const popup = document.getElementById("word-popup");
+const countChip = document.getElementById("block-count");
+const themeToggleButton = document.getElementById("theme-toggle");
 
-let state = loadData();
+let appData = { sections: [] };
+let lastWordClickMs = 0;
 
-function loadData() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return defaultData;
-    const parsed = JSON.parse(raw);
-    if (!parsed || !Array.isArray(parsed.sections)) return defaultData;
-    return parsed;
-  } catch (error) {
-    console.error("Failed to parse localStorage appData:", error);
-    return defaultData;
-  }
-}
-
-function saveData() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function getAllBlocks() {
-  return state.sections.flatMap((section) => section.blocks.map((block) => ({ ...block, sectionId: section.id })));
+  return appData.sections.flatMap((section) =>
+    section.blocks.map((block) => ({ ...block, sectionId: section.id }))
+  );
 }
 
 function getNextId(items) {
   return items.reduce((max, item) => Math.max(max, item.id), 0) + 1;
 }
 
-function route() {
-  const hash = window.location.hash || "#/";
-  closePopup();
-  updateCountChip();
+function saveAppData() {
+  localStorage.setItem(APP_DATA_KEY, JSON.stringify(appData));
+}
 
-  if (hash === "#/" || hash === "") {
+async function initializeAppData() {
+  const raw = localStorage.getItem(APP_DATA_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.sections)) {
+        appData = parsed;
+        return;
+      }
+    } catch {
+      // Continue to JSON fallback.
+    }
+  }
+
+  try {
+    const response = await fetch("./appData.json");
+    if (!response.ok) throw new Error("seed fetch failed");
+    const seed = await response.json();
+    appData = seed && Array.isArray(seed.sections) ? seed : { sections: [] };
+  } catch {
+    appData = {
+      sections: [
+        {
+          id: 1,
+          title: "Beginner Stories",
+          blocks: [
+            {
+              id: 1,
+              title: "A Morning Walk",
+              text: "Tom goes for a walk every morning. He sees birds, trees, and smiling people in the park.",
+            },
+          ],
+        },
+      ],
+    };
+  }
+  saveAppData();
+}
+
+function loadTheme() {
+  const currentTheme = localStorage.getItem(THEME_KEY) || "light";
+  document.body.setAttribute("data-theme", currentTheme);
+}
+
+function toggleTheme() {
+  const prev = document.body.getAttribute("data-theme") || "light";
+  const next = prev === "light" ? "dark" : "light";
+  document.body.setAttribute("data-theme", next);
+  localStorage.setItem(THEME_KEY, next);
+}
+
+function closePopup() {
+  popup.classList.add("hidden");
+}
+
+function showPopup(x, y, word, translation) {
+  popup.style.left = `${x}px`;
+  popup.style.top = `${y}px`;
+  popup.innerHTML = `
+    <div class="word-popup-word">${escapeHtml(word)}</div>
+    <div class="word-popup-translation">${escapeHtml(translation)}</div>
+  `;
+  popup.classList.remove("hidden");
+}
+
+function normalizeWord(word) {
+  return String(word).toLowerCase().replace(/[^a-z]/gi, "");
+}
+
+function readTranslationsCache() {
+  try {
+    const raw = localStorage.getItem(TRANSLATIONS_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeTranslationsCache(cache) {
+  localStorage.setItem(TRANSLATIONS_KEY, JSON.stringify(cache));
+}
+
+async function translateWord(word) {
+  const cleanWord = normalizeWord(word);
+  if (!cleanWord) return "Котормо жок";
+
+  const cache = readTranslationsCache();
+  if (cache[cleanWord]) return cache[cleanWord];
+
+  try {
+    const response = await fetch("https://libretranslate.de/translate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        q: cleanWord,
+        source: "en",
+        target: "ky",
+        format: "text",
+      }),
+    });
+    if (!response.ok) throw new Error("LibreTranslate failed");
+    const data = await response.json();
+    const result = data?.translatedText || "Котормо жок";
+    cache[cleanWord] = result;
+    writeTranslationsCache(cache);
+    return result;
+  } catch {
+    try {
+      const response = await fetch(
+        `https://api.mymemory.translated.net/get?q=${encodeURIComponent(cleanWord)}&langpair=en|ky`
+      );
+      if (!response.ok) throw new Error("MyMemory failed");
+      const data = await response.json();
+      const result = data?.responseData?.translatedText || "Котормо жок";
+      cache[cleanWord] = result;
+      writeTranslationsCache(cache);
+      return result;
+    } catch {
+      return "Котормо жок";
+    }
+  }
+}
+
+function updateCount() {
+  countChip.textContent = `${getAllBlocks().length} blocks`;
+}
+
+function createBlockCard(block, clickHandler) {
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "block-card";
+  card.innerHTML = `
+    <h3>${escapeHtml(block.title)}</h3>
+    <p>${escapeHtml(block.text.slice(0, 110))}${block.text.length > 110 ? "..." : ""}</p>
+  `;
+  card.addEventListener("click", clickHandler);
+  return card;
+}
+
+function renderHome() {
+  let html = `
+    <h1>English Reading Platform</h1>
+    <p class="subtle">Click a reading card and get Kyrgyz meanings instantly.</p>
+  `;
+
+  if (appData.sections.length === 0) {
+    appRoot.innerHTML = `${html}<p class="empty-message">No sections yet. Add content from Admin.</p>`;
+    return;
+  }
+
+  html += appData.sections
+    .map(
+      (section) => `
+      <section class="section">
+        <div class="section-header"><h2>${escapeHtml(section.title)}</h2></div>
+        <div class="block-grid" id="home-grid-${section.id}"></div>
+      </section>
+    `
+    )
+    .join("");
+  appRoot.innerHTML = html;
+
+  appData.sections.forEach((section) => {
+    const grid = document.getElementById(`home-grid-${section.id}`);
+    section.blocks.forEach((block) => {
+      grid.appendChild(
+        createBlockCard(block, () => {
+          window.location.hash = `#/read/${block.id}`;
+        })
+      );
+    });
+  });
+}
+
+function renderReader(blockId) {
+  const block = getAllBlocks().find((item) => item.id === blockId);
+  if (!block) {
+    appRoot.innerHTML = "<h1>Reader</h1><p class='empty-message'>Block not found.</p>";
+    return;
+  }
+
+  appRoot.innerHTML = `
+    <h1>${escapeHtml(block.title)}</h1>
+    <div id="reader-text" class="reader-text"></div>
+  `;
+  const readerText = document.getElementById("reader-text");
+  const tokens = block.text.match(TOKEN_REGEX) || [];
+
+  tokens.forEach((token, idx) => {
+    if (WORD_ONLY_REGEX.test(token)) {
+      const wordBtn = document.createElement("button");
+      wordBtn.type = "button";
+      wordBtn.className = "word-button";
+      wordBtn.textContent = token;
+      wordBtn.dataset.key = `${token}-${idx}`;
+      wordBtn.addEventListener("click", async (event) => {
+        const now = Date.now();
+        if (now - lastWordClickMs < 150) return;
+        lastWordClickMs = now;
+
+        const x = event.clientX + 10;
+        const y = event.clientY + 10;
+        showPopup(x, y, token, "Жүктөлүүдө...");
+        const translation = await translateWord(token);
+        showPopup(x, y, token, translation);
+      });
+      readerText.appendChild(wordBtn);
+    } else {
+      readerText.appendChild(document.createTextNode(token));
+    }
+  });
+}
+
+function renderAdmin() {
+  appRoot.innerHTML = `
+    <h1>Admin</h1>
+    <p class="subtle">Create, edit, and delete sections and blocks.</p>
+    <form id="new-section-form" class="admin-form">
+      <input id="new-section-title" type="text" placeholder="New section title" />
+      <button type="submit">Add Section</button>
+    </form>
+    <div id="admin-sections"></div>
+    <div id="admin-block-list"></div>
+  `;
+
+  document.getElementById("new-section-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const titleInput = document.getElementById("new-section-title");
+    const title = titleInput.value.trim();
+    if (!title) return;
+    appData.sections.push({ id: getNextId(appData.sections), title, blocks: [] });
+    saveAppData();
+    route();
+  });
+
+  const sectionsRoot = document.getElementById("admin-sections");
+  const blockListRoot = document.getElementById("admin-block-list");
+
+  if (appData.sections.length === 0) {
+    sectionsRoot.innerHTML = "<p class='empty-message'>No sections yet.</p>";
+    return;
+  }
+
+  appData.sections.forEach((section) => {
+    const sectionNode = document.createElement("section");
+    sectionNode.className = "section";
+    sectionNode.innerHTML = `
+      <div class="section-header">
+        <h2>${escapeHtml(section.title)}</h2>
+        <button type="button" class="danger-text-btn" data-section-del="${section.id}">Delete Section</button>
+      </div>
+      <div class="block-grid" id="admin-grid-${section.id}"></div>
+      <form class="admin-form-inline" data-add-block-form="${section.id}">
+        <label>Add block to "${escapeHtml(section.title)}"</label>
+        <input type="text" data-block-input="${section.id}" placeholder="Block title" />
+        <button type="submit">Add Block</button>
+      </form>
+    `;
+    sectionsRoot.appendChild(sectionNode);
+
+    const grid = sectionNode.querySelector(`#admin-grid-${section.id}`);
+    section.blocks.forEach((block) => {
+      grid.appendChild(
+        createBlockCard(block, () => {
+          window.location.hash = `#/edit/${block.id}`;
+        })
+      );
+      const row = document.createElement("div");
+      row.className = "admin-list-row";
+      row.innerHTML = `
+        <span>${escapeHtml(section.title)} / ${escapeHtml(block.title)}</span>
+        <button type="button" class="danger-text-btn" data-block-del="${section.id}:${block.id}">Delete Block</button>
+      `;
+      blockListRoot.appendChild(row);
+    });
+  });
+
+  sectionsRoot.querySelectorAll("[data-section-del]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const sectionId = Number(btn.dataset.sectionDel);
+      appData.sections = appData.sections.filter((section) => section.id !== sectionId);
+      saveAppData();
+      route();
+    });
+  });
+
+  sectionsRoot.querySelectorAll("[data-add-block-form]").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const sectionId = Number(form.dataset.addBlockForm);
+      const input = form.querySelector(`[data-block-input="${sectionId}"]`);
+      const title = input.value.trim();
+      if (!title) return;
+      const section = appData.sections.find((item) => item.id === sectionId);
+      if (!section) return;
+      const nextBlockId = getNextId(getAllBlocks());
+      section.blocks.push({ id: nextBlockId, title, text: "Write your English text here..." });
+      saveAppData();
+      route();
+    });
+  });
+
+  blockListRoot.querySelectorAll("[data-block-del]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const [sectionIdStr, blockIdStr] = btn.dataset.blockDel.split(":");
+      const sectionId = Number(sectionIdStr);
+      const blockId = Number(blockIdStr);
+      const section = appData.sections.find((item) => item.id === sectionId);
+      if (!section) return;
+      section.blocks = section.blocks.filter((block) => block.id !== blockId);
+      saveAppData();
+      route();
+    });
+  });
+}
+
+function renderEditor(blockId) {
+  let selectedSection = null;
+  let selectedBlock = null;
+
+  for (const section of appData.sections) {
+    const found = section.blocks.find((block) => block.id === blockId);
+    if (found) {
+      selectedSection = section;
+      selectedBlock = found;
+      break;
+    }
+  }
+
+  if (!selectedSection || !selectedBlock) {
+    appRoot.innerHTML = "<h1>Editor</h1><p class='empty-message'>Block not found.</p>";
+    return;
+  }
+
+  appRoot.innerHTML = `
+    <h1>Edit Block</h1>
+    <form id="edit-form" class="editor-form">
+      <label for="block-title">Title</label>
+      <input id="block-title" type="text" value="${escapeHtml(selectedBlock.title)}" />
+      <label for="block-text">Text</label>
+      <textarea id="block-text" rows="10">${escapeHtml(selectedBlock.text)}</textarea>
+      <div class="editor-actions">
+        <button type="submit">Save Changes</button>
+        <button id="delete-block-btn" type="button" class="danger-btn">Delete Block</button>
+      </div>
+    </form>
+  `;
+
+  document.getElementById("edit-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const title = document.getElementById("block-title").value.trim();
+    const text = document.getElementById("block-text").value;
+    if (!title) return;
+    selectedBlock.title = title;
+    selectedBlock.text = text;
+    saveAppData();
+    route();
+  });
+
+  document.getElementById("delete-block-btn").addEventListener("click", () => {
+    selectedSection.blocks = selectedSection.blocks.filter((block) => block.id !== blockId);
+    saveAppData();
+    window.location.hash = "#/admin";
+  });
+}
+
+function route() {
+  closePopup();
+  updateCount();
+  const hash = window.location.hash || "#/";
+
+  if (hash === "#/" || hash === "#") {
     renderHome();
     return;
   }
@@ -78,317 +431,20 @@ function route() {
   appRoot.innerHTML = "<h1>404</h1><p class='empty-message'>Page not found.</p>";
 }
 
-function updateCountChip() {
-  countChip.textContent = `${getAllBlocks().length} blocks`;
-}
-
-function createBlockCard(block) {
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "block-card";
-  btn.innerHTML = `
-    <h3>${escapeHtml(block.title)}</h3>
-    <p>${escapeHtml(block.text.slice(0, 110))}${block.text.length > 110 ? "..." : ""}</p>
-  `;
-  return btn;
-}
-
-function renderHome() {
-  let html = `
-    <h1>English Reading Platform</h1>
-    <p class="subtle">Click a reading card and get Kyrgyz word translations instantly.</p>
-  `;
-  if (state.sections.length === 0) {
-    html += `<p class="empty-message">No sections yet. Add content from Admin.</p>`;
-    appRoot.innerHTML = html;
-    return;
-  }
-
-  html += state.sections
-    .map(
-      (section) => `
-      <section class="section">
-        <div class="section-header"><h2>${escapeHtml(section.title)}</h2></div>
-        <div class="block-grid" id="home-grid-${section.id}"></div>
-      </section>
-    `
-    )
-    .join("");
-  appRoot.innerHTML = html;
-
-  state.sections.forEach((section) => {
-    const grid = document.getElementById(`home-grid-${section.id}`);
-    section.blocks.forEach((block) => {
-      const card = createBlockCard(block);
-      card.addEventListener("click", () => {
-        window.location.hash = `#/read/${block.id}`;
-      });
-      grid.appendChild(card);
-    });
-  });
-}
-
-function renderReader(blockId) {
-  const allBlocks = getAllBlocks();
-  const block = allBlocks.find((item) => item.id === blockId);
-  if (!block) {
-    appRoot.innerHTML = "<h1>Reader</h1><p class='empty-message'>Block not found.</p>";
-    return;
-  }
-
-  appRoot.innerHTML = `
-    <h1>${escapeHtml(block.title)}</h1>
-    <div id="reader-text" class="reader-text"></div>
-  `;
-
-  const readerText = document.getElementById("reader-text");
-  const tokens = block.text.match(TOKEN_REGEX) || [];
-
-  tokens.forEach((token) => {
-    if (WORD_CLICKABLE_REGEX.test(token)) {
-      const wordBtn = document.createElement("button");
-      wordBtn.type = "button";
-      wordBtn.className = "word-button";
-      wordBtn.textContent = token;
-      wordBtn.addEventListener("click", (event) => onWordClick(event, token));
-      readerText.appendChild(wordBtn);
-    } else {
-      readerText.appendChild(document.createTextNode(token));
-    }
-  });
-}
-
-function renderAdmin() {
-  appRoot.innerHTML = `
-    <h1>Admin</h1>
-    <p class="subtle">Create, edit, and delete sections and blocks.</p>
-
-    <form id="new-section-form" class="admin-form">
-      <input id="new-section-title" type="text" placeholder="New section title" />
-      <button type="submit">Add Section</button>
-    </form>
-    <div id="admin-sections"></div>
-    <div id="admin-block-list"></div>
-  `;
-
-  document.getElementById("new-section-form").addEventListener("submit", (event) => {
-    event.preventDefault();
-    const input = document.getElementById("new-section-title");
-    const title = input.value.trim();
-    if (!title) return;
-    state.sections.push({ id: getNextId(state.sections), title, blocks: [] });
-    saveData();
-    route();
-  });
-
-  const sectionsRoot = document.getElementById("admin-sections");
-  const blockListRoot = document.getElementById("admin-block-list");
-
-  if (state.sections.length === 0) {
-    sectionsRoot.innerHTML = "<p class='empty-message'>No sections yet.</p>";
-    return;
-  }
-
-  state.sections.forEach((section) => {
-    const sectionWrapper = document.createElement("section");
-    sectionWrapper.className = "section";
-    sectionWrapper.innerHTML = `
-      <div class="section-header">
-        <h2>${escapeHtml(section.title)}</h2>
-        <button type="button" class="danger-text-btn" data-del-section="${section.id}">Delete Section</button>
-      </div>
-      <div class="block-grid" id="admin-grid-${section.id}"></div>
-      <form class="admin-form-inline" data-add-block-form="${section.id}">
-        <label>Add block to "${escapeHtml(section.title)}"</label>
-        <input type="text" placeholder="Block title" data-add-block-input="${section.id}" />
-        <button type="submit">Add Block</button>
-      </form>
-    `;
-    sectionsRoot.appendChild(sectionWrapper);
-
-    const grid = sectionWrapper.querySelector(`#admin-grid-${section.id}`);
-    section.blocks.forEach((block) => {
-      const card = createBlockCard(block);
-      card.addEventListener("click", () => {
-        window.location.hash = `#/edit/${block.id}`;
-      });
-      grid.appendChild(card);
-
-      const row = document.createElement("div");
-      row.className = "admin-list-row";
-      row.innerHTML = `
-        <span>${escapeHtml(section.title)} / ${escapeHtml(block.title)}</span>
-        <button type="button" class="danger-text-btn" data-del-block="${section.id}:${block.id}">Delete Block</button>
-      `;
-      blockListRoot.appendChild(row);
-    });
-  });
-
-  sectionsRoot.querySelectorAll("[data-del-section]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const sectionId = Number(btn.getAttribute("data-del-section"));
-      state.sections = state.sections.filter((s) => s.id !== sectionId);
-      saveData();
-      route();
-    });
-  });
-
-  sectionsRoot.querySelectorAll("[data-add-block-form]").forEach((form) => {
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      const sectionId = Number(form.getAttribute("data-add-block-form"));
-      const input = form.querySelector(`[data-add-block-input="${sectionId}"]`);
-      const title = input.value.trim();
-      if (!title) return;
-      const allBlocks = getAllBlocks();
-      const nextId = getNextId(allBlocks);
-      const targetSection = state.sections.find((s) => s.id === sectionId);
-      if (!targetSection) return;
-      targetSection.blocks.push({
-        id: nextId,
-        title,
-        text: "Write your English text here...",
-      });
-      saveData();
-      route();
-    });
-  });
-
-  blockListRoot.querySelectorAll("[data-del-block]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const [sectionIdStr, blockIdStr] = btn.getAttribute("data-del-block").split(":");
-      const sectionId = Number(sectionIdStr);
-      const blockId = Number(blockIdStr);
-      const section = state.sections.find((s) => s.id === sectionId);
-      if (!section) return;
-      section.blocks = section.blocks.filter((b) => b.id !== blockId);
-      saveData();
-      route();
-    });
-  });
-}
-
-function renderEditor(blockId) {
-  let sectionId = null;
-  let block = null;
-
-  for (const section of state.sections) {
-    const found = section.blocks.find((item) => item.id === blockId);
-    if (found) {
-      sectionId = section.id;
-      block = found;
-      break;
-    }
-  }
-
-  if (!block || sectionId === null) {
-    appRoot.innerHTML = "<h1>Editor</h1><p class='empty-message'>Block not found.</p>";
-    return;
-  }
-
-  appRoot.innerHTML = `
-    <h1>Edit Block</h1>
-    <form id="edit-form" class="editor-form">
-      <label for="edit-title">Title</label>
-      <input id="edit-title" type="text" value="${escapeAttribute(block.title)}" />
-      <label for="edit-text">Text</label>
-      <textarea id="edit-text" rows="10">${escapeHtml(block.text)}</textarea>
-      <div class="editor-actions">
-        <button type="submit">Save Changes</button>
-        <button id="delete-block-btn" type="button" class="danger-btn">Delete Block</button>
-      </div>
-    </form>
-  `;
-
-  document.getElementById("edit-form").addEventListener("submit", (event) => {
-    event.preventDefault();
-    const title = document.getElementById("edit-title").value.trim();
-    const text = document.getElementById("edit-text").value;
-    if (!title) return;
-    const section = state.sections.find((s) => s.id === sectionId);
-    if (!section) return;
-    const item = section.blocks.find((b) => b.id === blockId);
-    if (!item) return;
-    item.title = title;
-    item.text = text;
-    saveData();
-    alert("Saved.");
-    route();
-  });
-
-  document.getElementById("delete-block-btn").addEventListener("click", () => {
-    const section = state.sections.find((s) => s.id === sectionId);
-    if (!section) return;
-    section.blocks = section.blocks.filter((b) => b.id !== blockId);
-    saveData();
-    window.location.hash = "#/admin";
-  });
-}
-
-async function onWordClick(event, word) {
-  const x = event.clientX + 8;
-  const y = event.clientY + 8;
-  showPopup(x, y, word, "Translating...");
-  try {
-    const translation = await translateWord(word);
-    showPopup(x, y, word, translation || "No translation found");
-  } catch (error) {
-    console.error(error);
-    showPopup(x, y, word, "Translation unavailable");
-  }
-}
-
-async function translateWord(word) {
-  const response = await fetch("https://libretranslate.de/translate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      q: word,
-      source: "en",
-      target: "ky",
-      format: "text",
-    }),
-  });
-  if (!response.ok) throw new Error("Translation request failed");
-  const data = await response.json();
-  return data.translatedText;
-}
-
-function showPopup(x, y, word, translation) {
-  popup.style.left = `${x}px`;
-  popup.style.top = `${y}px`;
-  popup.innerHTML = `
-    <div class="word-popup-label">Word</div>
-    <div class="word-popup-word">${escapeHtml(word)}</div>
-    <div class="word-popup-label">Kyrgyz</div>
-    <div class="word-popup-translation">${escapeHtml(translation)}</div>
-  `;
-  popup.classList.remove("hidden");
-}
-
-function closePopup() {
-  popup.classList.add("hidden");
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function escapeAttribute(value) {
-  return String(value).replaceAll('"', "&quot;");
-}
-
 document.addEventListener("click", (event) => {
   if (!popup.contains(event.target) && !event.target.classList.contains("word-button")) {
     closePopup();
   }
 });
 
+themeToggleButton.addEventListener("click", toggleTheme);
 window.addEventListener("hashchange", route);
-if (!window.location.hash) window.location.hash = "#/";
-route();
+
+async function bootstrap() {
+  loadTheme();
+  await initializeAppData();
+  if (!window.location.hash) window.location.hash = "#/";
+  route();
+}
+
+bootstrap();
