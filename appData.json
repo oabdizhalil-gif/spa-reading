@@ -1,0 +1,15 @@
+{
+  "sections": [
+    {
+      "id": 1,
+      "title": "Beginner Stories",
+      "blocks": [
+        {
+          "id": 1,
+          "title": "A Morning Walk",
+          "text": "Tom goes for a walk every morning. He sees birds, trees, and smiling people in the park."
+        }
+      ]
+    }
+  ]
+}
